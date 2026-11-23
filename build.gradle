@@ -1,0 +1,102 @@
+plugins {
+	// MC 1.20.1 是混淆版本，需用 remap 版插件（非混淆版用于 MC 26.1+）
+	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+	id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	// 产物名：中文名 + 英文名 + MC 版本，例如 杀戮光环++Killaura++-1.20.1-1.0.0.jar
+	// 这里直接写死而不用 gradle.properties，因为 .properties 按 ISO-8859-1 读取，中文会乱码；
+	// build.gradle 本身是 UTF-8，中文没问题。
+	archivesName = "杀戮光环++Killaura++-${project.minecraft_version}"
+}
+
+repositories {
+	// Fabric Loom 会自动添加 Fabric 官方 maven 与 Mojang 仓库，这里无需额外声明。
+	// Mod Menu 的 maven：它是软依赖，编译期从这里拿接口，仓库里不用放第三方 jar
+	maven {
+		name = "Terraformers"
+		url = "https://maven.terraformersmc.com/releases/"
+	}
+}
+
+dependencies {
+	// To change the versions see the gradle.properties file
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	// Fabric API. This is technically optional, but you probably want it anyway.
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+	// Mod Menu：运行期软依赖（fabric.mod.json 里写的是 recommends，不是 depends）。
+	// 装了它，「模组」列表里会多一个配置按钮；不装也能用模组自己的 K 键（可改）打开。
+	//
+	// 用 modCompileOnly 而不是 modImplementation：
+	//   - 编译期能看见 ModMenuApi 接口，代码可以 implements
+	//   - 不会打进产物，也不要求玩家安装
+	//   - 没装 Mod Menu 时，modmenu 那个 entrypoint 压根不会被加载，不会 NoClassDefFoundError
+	// modLocalRuntime 只作用于开发环境的 runClient，方便本地测 Mod Menu 入口，同样不进产物。
+	//
+	// 依赖来源：本地 libs/ 有 jar 就优先用（离线可用）；没有就从 Terraformers maven 拉。
+	// 这样仓库里不用提交第三方 jar，别人 clone 下来也能直接构建。
+	def localModMenu = project.file("libs/modmenu-7.2.2.jar")
+	if (localModMenu.exists()) {
+		modCompileOnly files(localModMenu)
+		modLocalRuntime files(localModMenu)
+	} else {
+		modCompileOnly "com.terraformersmc:modmenu:7.2.2"
+		modLocalRuntime "com.terraformersmc:modmenu:7.2.2"
+	}
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 17
+}
+
+java {
+	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
+	// if it is present.
+	// If you remove this line, sources will not be generated.
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.VERSION_17
+	targetCompatibility = JavaVersion.VERSION_17
+}
+
+jar {
+	inputs.property "archivesName", project.base.archivesName
+
+	from("LICENSE") {
+		rename { "${it}_${inputs.properties.archivesName}" }
+	}
+}
+
+// configure the maven publication
+publishing {
+	publications {
+		mavenJava(MavenPublication) {
+			from components.java
+		}
+	}
+
+	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
+	repositories {
+		// Add repositories to publish to here.
+		// Notice: This block does NOT have the same function as the block in the top level.
+		// The repositories here will be used for publishing your artifact, not for
+		// retrieving dependencies.
+	}
+}

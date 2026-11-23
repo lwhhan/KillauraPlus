@@ -1,0 +1,36 @@
+{
+	"schemaVersion": 1,
+	"id": "killauraplus",
+	"version": "${version}",
+	"name": "Killaura++",
+	"description": "Killaura++（杀戮光环++）—— Fabric 1.20.1 纯客户端模组。按 R 键自动攻击周围目标，按 K 键（可改）打开设置界面，装了 Mod Menu 也能从模组列表进入。早期参考过杀戮光环模组的实现，此后已整体重写（追踪箭、按血量决定箭数、目标调度、界面等均为独立实现），与前者不是同一个模组。",
+	"authors": [
+		"Lwh"
+	],
+	"contributors": [
+		"Yiyuyan (early Forge implementation)"
+	],
+	"license": "CC0-1.0",
+	"icon": "assets/killauraplus/icon.png",
+	"environment": "client",
+	"mixins": [
+		"killauraplus.mixins.json"
+	],
+	"entrypoints": {
+		"client": [
+			"com.killauraplus.KillauraMod"
+		],
+		"modmenu": [
+			"com.killauraplus.KillauraModMenu"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.16.0",
+		"minecraft": "~1.20.1",
+		"java": ">=17",
+		"fabric-api": "*"
+	},
+	"recommends": {
+		"modmenu": ">=7.0.0"
+	}
+}
