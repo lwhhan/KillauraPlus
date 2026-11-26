@@ -10,7 +10,7 @@
 	"contributors": [
 		"Yiyuyan (early Forge implementation)"
 	],
-	"license": "CC0-1.0",
+	"license": "MIT",
 	"icon": "assets/killauraplus/icon.png",
 	"environment": "client",
 	"mixins": [

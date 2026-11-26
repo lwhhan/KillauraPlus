@@ -273,6 +273,38 @@ public class KillauraCore {
     /** 是否已有一个射箭任务排在服务端线程队列里（防重复提交堆积） */
     private static volatile boolean bowTaskQueued = false;
 
+    /**
+     * 弓箭模式「本轮」结束后，下一轮最早可以开始的时间（游戏刻）。
+     *
+     * 为什么需要它：一轮的目标全部处理完（打死 / 跑出射程 / 箭够了）时队列会变空。
+     * 如果这时立刻重新搜索目标，就会出现「上一个怪刚死、下一 tick 就去射下一个」，
+     * 攻击间隔设置等于完全没生效，看起来像在同时打一堆目标 —— 也就是
+     * 「同时攻击目标设 1、间隔设 10，却还在连续打不同目标」的那个现象。
+     * 由服务端线程在队列清空时写入，客户端线程只读。
+     */
+    private static volatile long bowNextRoundAt = 0L;
+
+    /** 本轮开始的游戏刻；0 表示当前没有进行中的一轮。 */
+    private static volatile long bowRoundStartAt = 0L;
+
+    /** 本轮已经射出的箭数（服务端线程维护），用来识别「一支箭都射不出去的卡死」。 */
+    private static volatile int bowRoundShots = 0;
+
+    /**
+     * 一轮里「一支箭都没射出去」最多允许持续多少 tick。
+     * 超过就强制结束本轮换目标 —— 典型场景是目标躲到墙后，箭反复撞墙，
+     * 它却一直占着队列位置，把别的怪全挡在外面。
+     */
+    private static final int BOW_STUCK_TICKS = 60;
+
+    /**
+     * 单轮最长持续时间（tick）。超过就强制结束本轮重新开始。
+     * 主要防「目标在墙后、箭反复撞墙」这类打不到又不肯放手的情况；
+     * 血厚的目标正常打也会碰到这个上限，但重新开始后会立刻选回同一个目标继续射，
+     * 只是中间停顿一个攻击间隔，不影响实际输出。
+     */
+    private static final int BOW_ROUND_MAX_TICKS = 400;
+
     /** shootArrowAt 的三种结果 */
     private static final int SHOT_DONE = -1;   // 不需要再射（目标死了 / 在飞的箭已经够 / 没箭矢）
     private static final int SHOT_WAIT = 0;    // 还没到时候（攻击间隔未到 / 撞墙冷却中），下一 tick 再看
@@ -347,6 +379,9 @@ public class KillauraCore {
                     pendingShots.clear();
                     nextShotAt.clear();
                     blockedUntil.clear();
+                    bowNextRoundAt = 0L;
+                    bowRoundStartAt = 0L;
+                    bowRoundShots = 0;
                 }
                 player.displayClientMessage(
                         Component.translatable(enabled
@@ -405,8 +440,25 @@ public class KillauraCore {
                     // 还没放回」的空队列，会误判成「射完了」，把冷却设成整整一个攻击间隔，
                     // 目标就卡在那里不动 —— 也就是「不重启就不射」的那个现象。
                     cooldownRemaining = 1;
-                    // 不 return：继续往下搜索新目标，免得脚下刚冒出来的怪被排队目标挡住
+                    // 本轮还没结束：只处理队列，不再搜索新目标。
+                    // 之前这里不 return，每 tick 都往队列里塞「当前最近的怪」，
+                    // 即使 targetCount 设成 1 也会不断换人，看起来像同时在打很多目标。
+                    // 队列里的目标死了 / 跑出射程 / 射够了，服务端会把它踢出队列，
+                    // 下一 tick 这里就不会再进来，自然切换到新目标。
+                    return;
                 }
+            }
+        }
+
+        // 队列空着、但上一轮刚结束还没到时间 → 老老实实等满「攻击间隔」。
+        // 这一条就是「同时攻击目标设 1、间隔设 10，却还在连着打不同目标」的修复点：
+        // 上一个目标一死队列就空了，如果不在这里挡住，下一 tick 就会去射下一个，
+        // 攻击间隔设置形同虚设。
+        if (bowMode) {
+            long now = world.getGameTime();
+            if (now < bowNextRoundAt) {
+                cooldownRemaining = (int) Math.max(1L, bowNextRoundAt - now);
+                return;
             }
         }
 
@@ -590,6 +642,12 @@ public class KillauraCore {
         }
         pendingDim = dim;
 
+        // 新一轮开始：记下时间，供「卡死兜底」判断用（== 0 表示当前没有进行中的一轮）
+        if (bowRoundStartAt == 0L) {
+            bowRoundStartAt = player.level().getGameTime();
+            bowRoundShots = 0;
+        }
+
         // 本轮目标入队。队列长度必须受「同时攻击目标数」约束 —— 否则每 tick 都搜索一次，
         // 最近的目标一换人，旧目标还留在队列里、新目标又加进来，队列会越滚越长，
         // 表现出来就是「设成 1 却在同时打一堆目标」。
@@ -640,6 +698,8 @@ public class KillauraCore {
                 ServerPlayer serverPlayer = server.getPlayerList().getPlayer(player.getUUID());
                 if (serverPlayer == null) return;
 
+                long now = level.getGameTime();
+
                 // 取出和放回都在服务端线程完成，客户端线程不去读队列状态
                 int budget = Math.min(MAX_SHOTS_PER_TICK, pendingShots.size());
                 for (int i = 0; i < budget; i++) {
@@ -667,11 +727,28 @@ public class KillauraCore {
                     // 两支箭如果同一 tick 命中，第二支会被直接丢弃、等于白射。按间隔逐支射，
                     // 命中自然错开，配合追踪时的无敌帧清零，每一箭都真正结算。
                     int result = shootArrowAt(level, serverPlayer, bowStack, target);
+                    if (result == SHOT_FIRED) bowRoundShots++;
                     // 射出去了、或者在等攻击间隔/撞墙冷却 → 都留在队列里，下一 tick 再看；
                     // 只有「不需要再射」才真正出队
                     if (result != SHOT_DONE && !pendingShots.contains(id)) {
                         pendingShots.addLast(id);
                     }
+                }
+
+                // 队列空了 = 本轮结束：记下下一轮最早开始时间，
+                // 让「这一轮」和「下一轮」之间真的隔满攻击间隔。
+                if (pendingShots.isEmpty()) {
+                    bowRoundStartAt = 0L;
+                    bowRoundShots = 0;
+                    bowNextRoundAt = now + nextBowCooldown();
+                } else if (bowRoundStartAt != 0L
+                        && ((bowRoundShots == 0 && now - bowRoundStartAt > BOW_STUCK_TICKS)
+                            || now - bowRoundStartAt > BOW_ROUND_MAX_TICKS)) {
+                    // 一轮里一支箭都没射出去、又卡了很久：目标多半在墙后打不到。
+                    // 强制结束本轮把机会让给别的目标，免得队列被它一个人占死。
+                    pendingShots.clear();
+                    bowRoundStartAt = 0L;
+                    bowNextRoundAt = now + nextBowCooldown();
                 }
             } finally {
                 bowTaskQueued = false;
